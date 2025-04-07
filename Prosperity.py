@@ -1,100 +1,95 @@
 import json
-from datamodel import OrderDepth, TradingState, Order  # These classes are provided by the simulation environment.
+from datamodel import OrderDepth, TradingState, Order  # Provided by the simulation environment.
 from typing import List
 
 class Trader:
     def run(self, state: TradingState):
         """
-        Main function that is repeatedly called by the trading simulation.
-        It receives a TradingState object which contains all relevant market data,
-        including current orders, recent trades, and a string for persisting state.
+        This function is the main entry point of the trading algorithm.
+        It is called repeatedly by the simulation engine with updated market data.
+        The function returns a dictionary mapping product names to lists of orders,
+        along with a conversion request value and a persistent state string (traderData).
         """
-        # Attempt to load the persistent trader data (e.g., historical mid-prices) from the state.
-        # This allows the algorithm to "remember" previous iterations.
+        # Load persistent state (historical data, etc.) from previous iterations.
         try:
             trader_data = json.loads(state.traderData)
         except Exception:
-            # If traderData is empty or invalid, initialize with an empty dictionary.
             trader_data = {}
 
-        # This dictionary will hold the orders we decide to send for each product.
+        # Dictionary to collect orders for each product.
         orders_to_send = {}
 
-        # Loop over each product in the current order depths provided by the simulation.
+        # Iterate through each product's order depth in the market.
         for product, order_depth in state.order_depths.items():
-            orders: List[Order] = []  # List to collect orders for the current product.
+            orders: List[Order] = []  # List to store orders for the current product.
             
-            # Check if both buy and sell orders exist to calculate a fair mid-price.
+            # Calculate mid-price:
+            # The mid-price is a rough estimate of a product's "fair value" and is computed as:
+            # (Best Bid + Best Ask) / 2.
+            # The best bid is the highest price among buy orders, and the best ask is the lowest price among sell orders.
             if order_depth.buy_orders and order_depth.sell_orders:
-                # The best bid is the highest price someone is willing to buy.
                 best_bid = max(order_depth.buy_orders.keys(), key=float)
-                # The best ask is the lowest price someone is willing to sell.
                 best_ask = min(order_depth.sell_orders.keys(), key=float)
-                # Calculate the mid-price as the average of the best bid and best ask.
                 mid_price = (float(best_bid) + float(best_ask)) / 2
             elif order_depth.buy_orders:
-                # If there are only buy orders, use the best bid as a fallback mid-price.
                 mid_price = float(max(order_depth.buy_orders.keys(), key=float))
             elif order_depth.sell_orders:
-                # If there are only sell orders, use the best ask as a fallback mid-price.
                 mid_price = float(min(order_depth.sell_orders.keys(), key=float))
             else:
-                # If there are no orders available, skip trading for this product.
+                # If there are no orders available, skip processing this product.
                 continue
 
-            # Initialize the history for this product if not already present.
+            # Maintain a price history for each product to compute statistical measures like SMA.
             if product not in trader_data:
                 trader_data[product] = {"prices": []}
-            # Append the current mid-price to the historical list.
             trader_data[product]["prices"].append(mid_price)
-            # To avoid unbounded growth of the history, limit it to the 20 most recent mid-prices.
+            # Limit the history to the last 20 mid-prices to keep the SMA computation manageable.
             if len(trader_data[product]["prices"]) > 20:
                 trader_data[product]["prices"] = trader_data[product]["prices"][-20:]
             
-            # Calculate the simple moving average (SMA) of the stored mid-prices.
+            # Compute the Simple Moving Average (SMA) as our estimate of the product's fair price.
             sma = sum(trader_data[product]["prices"]) / len(trader_data[product]["prices"])
             
-            # Define a threshold (5% of the SMA) to identify significant deviations.
+            # Define a threshold (5% of the SMA) to determine when a price deviation is significant.
             threshold = 0.05 * sma
-            # Use the SMA as our acceptable or fair price for this product.
-            acceptable_price = sma
+            acceptable_price = sma  # In this strategy, our fair price is taken to be the SMA.
 
-            # --- Trading Signal Generation ---
-            # Check if there's an opportunity to buy:
-            # If the best sell price (ask) is significantly below our acceptable price, then it's a buying signal.
+            # ---- Trading Strategy based on Order Book and Price Deviations ----
+            # The trading glossary explains:
+            # - A bid order is a BUY order and an ask order (or offer) is a SELL order.
+            # - Orders are matched when buy orders are priced higher than sell orders.
+            #
+            # Here we exploit a potential mean-reversion:
+            # If the best available sell price (ask) is significantly below our fair price,
+            # it indicates a buying opportunity because the asset is "cheap."
             if order_depth.sell_orders:
                 best_sell_price = float(min(order_depth.sell_orders.keys(), key=float))
                 best_sell_volume = order_depth.sell_orders[min(order_depth.sell_orders.keys(), key=float)]
-                # Compare best sell price with the acceptable price, taking the threshold into account.
                 if best_sell_price < acceptable_price - threshold:
-                    # Create a buy order.
-                    # Negative volume indicates a buy order in this simulation.
+                    # A negative volume indicates a BUY order in this simulation context.
                     orders.append(Order(product, best_sell_price, -abs(best_sell_volume)))
             
-            # Check if there's an opportunity to sell:
-            # If the best buy price (bid) is significantly above our acceptable price, then it's a selling signal.
+            # Similarly, if the best available buy price (bid) is significantly above our fair price,
+            # it indicates a selling opportunity because the asset is "expensive."
             if order_depth.buy_orders:
                 best_buy_price = float(max(order_depth.buy_orders.keys(), key=float))
                 best_buy_volume = order_depth.buy_orders[max(order_depth.buy_orders.keys(), key=float)]
-                # Compare best buy price with the acceptable price, taking the threshold into account.
                 if best_buy_price > acceptable_price + threshold:
-                    # Create a sell order.
-                    # Positive volume indicates a sell order in this simulation.
+                    # A positive volume indicates a SELL order.
                     orders.append(Order(product, best_buy_price, abs(best_buy_volume)))
             
-            # Add the orders for the current product to the final orders dictionary.
+            # Append any orders we have created for the current product.
             orders_to_send[product] = orders
 
-        # Convert the updated trader_data dictionary back to a JSON string for persistence.
-        # This string will be available in the next iteration via state.traderData.
+        # Update the persistent state (traderData) with the new price history.
         new_trader_data_str = json.dumps(trader_data)
         
-        # The simulation might allow conversion requests; we set this as a sample value.
+        # Conversion request sample (used by simulation, can be adjusted as needed).
         conversions = 1
         
-        # Submission identifier is used for tracking in the trading competition.
+        # Submission identifier is essential for tracking your algorithm in the competition.
         submission_uuid = "59f81e67-f6c6-4254-b61e-39661eac6141"
         print("Submission UUID:", submission_uuid)
 
-        # Return the orders to send, the conversion request value, and the persistent state string.
+        # Return the orders, conversion request, and updated traderData.
         return orders_to_send, conversions, new_trader_data_str
